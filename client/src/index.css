@@ -1,0 +1,23 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap');
+@import "tailwindcss";
+
+*{
+  font-family: "Outfit", sans-serif;
+}
+@theme{
+  --primary: #5044E5
+}
+.cl-card,
+.cl-modal,
+.cl-sheet,
+.cl-rootBox {
+  z-index: 9999 !important;
+}
+
+.reset-tw, .reset-tw *{
+  all:revert !important
+}
+
+.cl-drawerRoot{
+  z-index:10;
+}
