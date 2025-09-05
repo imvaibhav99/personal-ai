@@ -2,6 +2,8 @@
 
 Personal AI is a web application that allows users to interact with AI models, upload files (images, PDFs, resumes), and receive AI-powered responses. The backend is built with **Node.js**, **Express**, **Cloudinary**, and **Serverless-ready** for deployment on **Vercel**.
 
+WORKING DEMO:https://personal-ai-vaibhav-mmzc.onrender.com/
+
 ## Features
 
 - Upload files (images, PDFs, resumes) directly to Cloudinary.
