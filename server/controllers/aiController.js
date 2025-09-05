@@ -4,6 +4,7 @@ import axios from "axios";
 import cloudinary from "../config/cloudinary.js";
 import fs from 'fs'
 import pdf from 'pdf-parse/lib/pdf-parse.js'
+import { clerkClient } from '@clerk/express'
 
 const openai = new OpenAI({
     apiKey: process.env.GEMINI_API_KEY,
@@ -108,7 +109,7 @@ const response = await openai.chat.completions.create({
 
 export const generateImage = async (req,res)=>{
     try{
-        const {userId}= req.auth;
+        const {userId}= req.auth();
         const {prompt, publish }= req.body;
         const plan = req.plan;
         
