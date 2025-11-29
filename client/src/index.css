@@ -4,9 +4,21 @@
 *{
   font-family: "Outfit", sans-serif;
 }
-@theme{
+/* @theme{
   --primary: #5044E5
+} */
+ @theme {
+  --primary: #5044E5;
+  --background: #ffffff;
+  --foreground: #000000;
 }
+
+.dark {
+  --primary: #7c6df5; /* maybe a lighter purple */
+  --background: #0f0f10;
+  --foreground: #f5f5f5;
+}
+
 .cl-card,
 .cl-modal,
 .cl-sheet,

@@ -7,7 +7,7 @@ const Footer = () => {
       <div className="max-w-7xl mx-auto px-6 py-12 flex flex-col items-center space-y-6">
         
         {/* Brand */}
-        <h2 className="text-2xl font-bold text-white">Quick.ai</h2>
+        <h2 className="text-2xl font-bold text-white">Personal AI</h2>
         <p className="text-center text-sm text-gray-400 max-w-md">
           Building modern solutions that empower businesses to grow and succeed.  
           Made with ❤️ and innovation.
@@ -34,7 +34,7 @@ const Footer = () => {
 
         {/* Copyright */}
         <p className="text-sm text-gray-500">
-          © {new Date().getFullYear()} Quick.ai. All rights reserved.
+          © {new Date().getFullYear()} Personal AI. All rights reserved.
         </p>
       </div>
     </footer>
