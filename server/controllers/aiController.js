@@ -10,7 +10,26 @@ const openai = new OpenAI({
     apiKey: process.env.GEMINI_API_KEY,
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
     maxRetries: 0, // We handle retries ourselves
+    timeout: 60000, // 60 second timeout
 });
+
+// Simple request throttling - track last request time
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 2000; // Minimum 2 seconds between requests
+
+const throttleRequest = async (apiCall) => {
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime;
+    
+    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+        const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+        console.log(`Throttling: Waiting ${waitTime}ms before API call`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    lastRequestTime = Date.now();
+    return await apiCall();
+};
 
 // Helper function to check if error is a rate limit (429) error
 const isRateLimitError = (error) => {
@@ -46,34 +65,47 @@ const isRateLimitError = (error) => {
 
 // Helper function to handle API calls with retry logic for rate limits
 const callWithRetry = async (apiCall, maxRetries = 5) => {
+    let lastError = null;
+    
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
             return await apiCall();
         } catch (error) {
+            lastError = error;
             const isRateLimit = isRateLimitError(error);
+            
+            // Log the error structure for debugging
+            console.log(`API Call Error (attempt ${attempt + 1}/${maxRetries}):`, {
+                isRateLimit,
+                status: error?.status || error?.statusCode || error?.response?.status,
+                statusCode: error?.statusCode,
+                code: error?.code,
+                type: error?.type,
+                message: error?.message?.substring(0, 200),
+                responseStatus: error?.response?.status,
+                responseData: error?.response?.data
+            });
             
             // Check if it's a 429 rate limit error and we have retries left
             if (isRateLimit && attempt < maxRetries - 1) {
-                // Exponential backoff with jitter: wait 2^attempt seconds + random 0-1 second
-                const baseWaitTime = Math.pow(2, attempt) * 1000;
-                const jitter = Math.random() * 1000;
+                // Longer exponential backoff: start with 5 seconds, then 10, 20, 40, 80 seconds
+                const baseWaitTime = Math.pow(2, attempt) * 5000; // Start at 5 seconds
+                const jitter = Math.random() * 2000; // Add 0-2 seconds of jitter
                 const waitTime = baseWaitTime + jitter;
                 
-                console.log(`Rate limit hit (attempt ${attempt + 1}/${maxRetries}). Retrying in ${Math.round(waitTime)}ms`);
-                console.log('Error details:', {
-                    status: error?.status || error?.statusCode || error?.response?.status,
-                    code: error?.code,
-                    message: error?.message?.substring(0, 100)
-                });
+                console.log(`Rate limit detected. Waiting ${Math.round(waitTime/1000)}s before retry ${attempt + 2}/${maxRetries}`);
                 
                 await new Promise(resolve => setTimeout(resolve, waitTime));
                 continue;
             }
             
-            // If it's a 429 on the last attempt or other error, throw it
-            throw error;
+            // If it's not a rate limit error or we've exhausted retries, break
+            break;
         }
     }
+    
+    // If we get here, all retries failed
+    throw lastError;
 };
 
 // Helper function to handle errors and send appropriate responses
@@ -115,9 +147,16 @@ const handleError = (error, res) => {
                         'An unexpected error occurred';
     
     if (isRateLimit || status === 429) {
+        // Check if there's a retry-after header or wait time suggestion
+        const retryAfter = error?.response?.headers?.['retry-after'] || 
+                          error?.response?.headers?.['Retry-After'] ||
+                          error?.retryAfter;
+        
+        const waitTime = retryAfter ? ` Please try again after ${retryAfter} seconds.` : ' Please wait a few minutes and try again.';
+        
         return res.status(429).json({
             success: false,
-            message: 'Rate limit exceeded. The API is temporarily unavailable. Please wait a few moments and try again.'
+            message: `Rate limit exceeded. The API is temporarily unavailable.${waitTime}`
         });
     }
     
@@ -146,17 +185,19 @@ export const generateArticle= async (req,res)=>{
         }
 
         const response = await callWithRetry(() => 
-            openai.chat.completions.create({
-                model: "gemini-2.0-flash",
-                messages: [
-                    {
-                        role: "user",
-                        content:prompt,
-                    },
-                ],
-                temperature: 0.7,
-                max_tokens: length,
-            })
+            throttleRequest(() => 
+                openai.chat.completions.create({
+                    model: "gemini-2.0-flash",
+                    messages: [
+                        {
+                            role: "user",
+                            content:prompt,
+                        },
+                    ],
+                    temperature: 0.7,
+                    max_tokens: length,
+                })
+            )
         );
 
         const content= response.choices[0].message.content 
@@ -193,17 +234,19 @@ export const generateBlogTitle = async (req,res)=>{
         }
 
         const response = await callWithRetry(() => 
-            openai.chat.completions.create({
-                model: "gemini-2.0-flash",
-                messages: [
-                    {
-                        role: "user",
-                        content:prompt,
-                    },
-                ],
-                temperature: 0.7,
-                max_tokens: 1000,
-            })
+            throttleRequest(() => 
+                openai.chat.completions.create({
+                    model: "gemini-2.0-flash",
+                    messages: [
+                        {
+                            role: "user",
+                            content:prompt,
+                        },
+                    ],
+                    temperature: 0.7,
+                    max_tokens: 1000,
+                })
+            )
         );
 
         const content= response.choices[0].message.content 
@@ -357,12 +400,14 @@ export const resumeReview = async (req, res) => {
     const prompt = `Review the following resume and provide constructive feedback on its strengths, weaknesses, and areas for improvement.\n\nResume Content:\n\n${pdfData.text}`;
 
     const response = await callWithRetry(() => 
-      openai.chat.completions.create({
-        model: "gemini-2.0-flash",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
-        max_tokens: 1500,
-      })
+      throttleRequest(() => 
+        openai.chat.completions.create({
+          model: "gemini-2.0-flash",
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.7,
+          max_tokens: 1500,
+        })
+      )
     );
 
     const content = response.choices[0].message.content;
