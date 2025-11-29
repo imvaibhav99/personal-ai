@@ -8,27 +8,64 @@ import { clerkClient } from '@clerk/express'
 
 const openai = new OpenAI({
     apiKey: process.env.GEMINI_API_KEY,
-    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    maxRetries: 0, // We handle retries ourselves
 });
 
+// Helper function to check if error is a rate limit (429) error
+const isRateLimitError = (error) => {
+    // Check status code in various locations
+    const status = error?.status || 
+                  error?.statusCode || 
+                  error?.response?.status || 
+                  error?.response?.statusCode ||
+                  error?.status_code;
+    
+    // Check error code
+    const code = error?.code || error?.type;
+    const isRateLimitCode = code === 'rate_limit_exceeded' || 
+                           code === 'rate_limit' ||
+                           code === '429';
+    
+    // Check error message for rate limit keywords
+    const errorMessage = (error?.message || '').toLowerCase();
+    const isRateLimitMessage = errorMessage.includes('429') ||
+                              errorMessage.includes('rate limit') ||
+                              errorMessage.includes('too many requests') ||
+                              errorMessage.includes('quota exceeded');
+    
+    // Check response data
+    const responseData = error?.response?.data || error?.error;
+    const responseMessage = (responseData?.message || responseData?.error?.message || '').toLowerCase();
+    const isRateLimitResponse = responseMessage.includes('429') ||
+                                responseMessage.includes('rate limit') ||
+                                responseMessage.includes('too many requests');
+    
+    return status === 429 || isRateLimitCode || isRateLimitMessage || isRateLimitResponse;
+};
+
 // Helper function to handle API calls with retry logic for rate limits
-const callWithRetry = async (apiCall, maxRetries = 3) => {
+const callWithRetry = async (apiCall, maxRetries = 5) => {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
             return await apiCall();
         } catch (error) {
-            // Check multiple possible locations for status code
-            const status = error?.status || 
-                          error?.statusCode || 
-                          error?.response?.status || 
-                          error?.response?.statusCode ||
-                          (error?.code === 'rate_limit_exceeded' ? 429 : null);
+            const isRateLimit = isRateLimitError(error);
             
-            // Check if it's a 429 rate limit error
-            if (status === 429 && attempt < maxRetries - 1) {
-                // Exponential backoff: wait 2^attempt seconds
-                const waitTime = Math.pow(2, attempt) * 1000;
-                console.log(`Rate limit hit. Retrying in ${waitTime}ms (attempt ${attempt + 1}/${maxRetries})`);
+            // Check if it's a 429 rate limit error and we have retries left
+            if (isRateLimit && attempt < maxRetries - 1) {
+                // Exponential backoff with jitter: wait 2^attempt seconds + random 0-1 second
+                const baseWaitTime = Math.pow(2, attempt) * 1000;
+                const jitter = Math.random() * 1000;
+                const waitTime = baseWaitTime + jitter;
+                
+                console.log(`Rate limit hit (attempt ${attempt + 1}/${maxRetries}). Retrying in ${Math.round(waitTime)}ms`);
+                console.log('Error details:', {
+                    status: error?.status || error?.statusCode || error?.response?.status,
+                    code: error?.code,
+                    message: error?.message?.substring(0, 100)
+                });
+                
                 await new Promise(resolve => setTimeout(resolve, waitTime));
                 continue;
             }
@@ -41,32 +78,46 @@ const callWithRetry = async (apiCall, maxRetries = 3) => {
 
 // Helper function to handle errors and send appropriate responses
 const handleError = (error, res) => {
-    console.error('API Error:', {
+    // Log full error for debugging
+    console.error('API Error Details:', {
         message: error?.message,
         status: error?.status,
         statusCode: error?.statusCode,
-        response: error?.response,
-        code: error?.code
+        status_code: error?.status_code,
+        code: error?.code,
+        type: error?.type,
+        response: error?.response ? {
+            status: error.response.status,
+            statusText: error.response.statusText,
+            data: error.response.data
+        } : null,
+        error: error?.error,
+        stack: error?.stack?.substring(0, 200)
     });
+    
+    // Check if it's a rate limit error
+    const isRateLimit = isRateLimitError(error);
     
     // Check multiple possible locations for status code
     const status = error?.status || 
                   error?.statusCode || 
+                  error?.status_code ||
                   error?.response?.status || 
                   error?.response?.statusCode ||
-                  (error?.code === 'rate_limit_exceeded' ? 429 : null);
+                  (isRateLimit ? 429 : null);
     
     // Extract error message from various possible locations
     const errorMessage = error?.message || 
                         error?.response?.data?.error?.message ||
                         error?.response?.data?.message ||
                         error?.error?.message ||
+                        error?.error?.error?.message ||
                         'An unexpected error occurred';
     
-    if (status === 429 || error?.code === 'rate_limit_exceeded') {
+    if (isRateLimit || status === 429) {
         return res.status(429).json({
             success: false,
-            message: 'Rate limit exceeded. Please wait a moment and try again.'
+            message: 'Rate limit exceeded. The API is temporarily unavailable. Please wait a few moments and try again.'
         });
     }
     
@@ -79,7 +130,7 @@ const handleError = (error, res) => {
     
     return res.status(status || 500).json({
         success: false,
-        message: errorMessage
+        message: errorMessage || 'An unexpected error occurred. Please try again later.'
     });
 };
 
