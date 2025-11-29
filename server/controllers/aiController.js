@@ -11,7 +11,77 @@ const openai = new OpenAI({
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/"
 });
 
+// Helper function to handle API calls with retry logic for rate limits
+const callWithRetry = async (apiCall, maxRetries = 3) => {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            return await apiCall();
+        } catch (error) {
+            // Check multiple possible locations for status code
+            const status = error?.status || 
+                          error?.statusCode || 
+                          error?.response?.status || 
+                          error?.response?.statusCode ||
+                          (error?.code === 'rate_limit_exceeded' ? 429 : null);
+            
+            // Check if it's a 429 rate limit error
+            if (status === 429 && attempt < maxRetries - 1) {
+                // Exponential backoff: wait 2^attempt seconds
+                const waitTime = Math.pow(2, attempt) * 1000;
+                console.log(`Rate limit hit. Retrying in ${waitTime}ms (attempt ${attempt + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                continue;
+            }
+            
+            // If it's a 429 on the last attempt or other error, throw it
+            throw error;
+        }
+    }
+};
 
+// Helper function to handle errors and send appropriate responses
+const handleError = (error, res) => {
+    console.error('API Error:', {
+        message: error?.message,
+        status: error?.status,
+        statusCode: error?.statusCode,
+        response: error?.response,
+        code: error?.code
+    });
+    
+    // Check multiple possible locations for status code
+    const status = error?.status || 
+                  error?.statusCode || 
+                  error?.response?.status || 
+                  error?.response?.statusCode ||
+                  (error?.code === 'rate_limit_exceeded' ? 429 : null);
+    
+    // Extract error message from various possible locations
+    const errorMessage = error?.message || 
+                        error?.response?.data?.error?.message ||
+                        error?.response?.data?.message ||
+                        error?.error?.message ||
+                        'An unexpected error occurred';
+    
+    if (status === 429 || error?.code === 'rate_limit_exceeded') {
+        return res.status(429).json({
+            success: false,
+            message: 'Rate limit exceeded. Please wait a moment and try again.'
+        });
+    }
+    
+    if (status === 401 || status === 403) {
+        return res.status(status).json({
+            success: false,
+            message: 'API authentication failed. Please check your API key configuration.'
+        });
+    }
+    
+    return res.status(status || 500).json({
+        success: false,
+        message: errorMessage
+    });
+};
 
 export const generateArticle= async (req,res)=>{
     try{
@@ -24,36 +94,36 @@ export const generateArticle= async (req,res)=>{
             return res.json({success: false, message:"Limit reached,update to continue"})
         }
 
-const response = await openai.chat.completions.create({
-    model: "gemini-2.0-flash",
-    messages: [
-        {
-            role: "user",
-            content:prompt,
-        },
-    ],
-    temperature: 0.7,
-    max_tokens: length,
-});
+        const response = await callWithRetry(() => 
+            openai.chat.completions.create({
+                model: "gemini-2.0-flash",
+                messages: [
+                    {
+                        role: "user",
+                        content:prompt,
+                    },
+                ],
+                temperature: 0.7,
+                max_tokens: length,
+            })
+        );
 
-    const content= response.choices[0].message.content 
+        const content= response.choices[0].message.content 
 
-    await sql` INSERT INTO creations (user_id, prompt, content, type) 
-    VALUES (${userId}, ${prompt}, ${content}, 'article' )`;
+        await sql` INSERT INTO creations (user_id, prompt, content, type) 
+        VALUES (${userId}, ${prompt}, ${content}, 'article' )`;
 
-    if(plan!=='premium'){
-        await clerkClient.users.updateUserMetadata(userId, {
-            privateMetadata:{
-                free_usage: free_usage +1
-            }
-        })
-    }
+        if(plan!=='premium'){
+            await clerkClient.users.updateUserMetadata(userId, {
+                privateMetadata:{
+                    free_usage: free_usage +1
+                }
+            })
+        }
         res.json({ success: true, content})
 
     }catch(error){
-        console.log(error.message);
-        res.json({success: false, message: error.message})
-        
+        return handleError(error, res);
     }
 }
 
@@ -71,36 +141,36 @@ export const generateBlogTitle = async (req,res)=>{
             return res.json({success: false, message:"Limit reached,update to continue"})
         }
 
-const response = await openai.chat.completions.create({
-    model: "gemini-2.0-flash",
-    messages: [
-        {
-            role: "user",
-            content:prompt,
-        },
-    ],
-    temperature: 0.7,
-    max_tokens: 1000,
-});
+        const response = await callWithRetry(() => 
+            openai.chat.completions.create({
+                model: "gemini-2.0-flash",
+                messages: [
+                    {
+                        role: "user",
+                        content:prompt,
+                    },
+                ],
+                temperature: 0.7,
+                max_tokens: 1000,
+            })
+        );
 
-    const content= response.choices[0].message.content 
+        const content= response.choices[0].message.content 
 
-    await sql` INSERT INTO creations (user_id, prompt, content, type) 
-    VALUES (${userId}, ${prompt}, ${content}, 'blog-title' )`;
+        await sql` INSERT INTO creations (user_id, prompt, content, type) 
+        VALUES (${userId}, ${prompt}, ${content}, 'blog-title' )`;
 
-    if(plan!=='premium'){
-        await clerkClient.users.updateUserMetadata(userId, {
-            privateMetadata:{
-                free_usage: free_usage +1
-            }
-        })
-    }
+        if(plan!=='premium'){
+            await clerkClient.users.updateUserMetadata(userId, {
+                privateMetadata:{
+                    free_usage: free_usage +1
+                }
+            })
+        }
         res.json({ success: true, content})
 
     }catch(error){
-        console.log(error.message);
-        res.json({success: false, message: error.message})
-        
+        return handleError(error, res);
     }
 }
 
@@ -235,12 +305,14 @@ export const resumeReview = async (req, res) => {
 
     const prompt = `Review the following resume and provide constructive feedback on its strengths, weaknesses, and areas for improvement.\n\nResume Content:\n\n${pdfData.text}`;
 
-    const response = await openai.chat.completions.create({
-      model: "gemini-2.0-flash",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.7,
-      max_tokens: 1500,
-    });
+    const response = await callWithRetry(() => 
+      openai.chat.completions.create({
+        model: "gemini-2.0-flash",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.7,
+        max_tokens: 1500,
+      })
+    );
 
     const content = response.choices[0].message.content;
 
@@ -260,7 +332,6 @@ res.json({
 });
 
   } catch (error) {
-    console.log(error.message);
-    res.json({ success: false, message: error.message });
+    return handleError(error, res);
   }
 };
