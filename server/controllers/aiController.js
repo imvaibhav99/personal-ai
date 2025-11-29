@@ -15,15 +15,21 @@ const openai = new OpenAI({
 
 // Simple request throttling - track last request time
 let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 2000; // Minimum 2 seconds between requests
+let consecutiveRateLimits = 0; // Track consecutive rate limit errors
+const MIN_REQUEST_INTERVAL = 5000; // Minimum 5 seconds between requests (increased from 2s)
 
 const throttleRequest = async (apiCall) => {
     const now = Date.now();
     const timeSinceLastRequest = now - lastRequestTime;
     
-    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
-        const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
-        console.log(`Throttling: Waiting ${waitTime}ms before API call`);
+    // Increase wait time if we've had recent rate limits
+    const baseInterval = MIN_REQUEST_INTERVAL;
+    const additionalWait = consecutiveRateLimits * 5000; // Add 5s for each consecutive rate limit
+    const requiredInterval = baseInterval + additionalWait;
+    
+    if (timeSinceLastRequest < requiredInterval) {
+        const waitTime = requiredInterval - timeSinceLastRequest;
+        console.log(`Throttling: Waiting ${Math.round(waitTime/1000)}s before API call (consecutive rate limits: ${consecutiveRateLimits})`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
     }
     
@@ -66,13 +72,25 @@ const isRateLimitError = (error) => {
 // Helper function to handle API calls with retry logic for rate limits
 const callWithRetry = async (apiCall, maxRetries = 5) => {
     let lastError = null;
+    let rateLimitCount = 0;
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            return await apiCall();
+            const result = await apiCall();
+            // Success - reset consecutive rate limit counter
+            if (consecutiveRateLimits > 0) {
+                console.log(`Request succeeded. Resetting consecutive rate limit counter (was ${consecutiveRateLimits})`);
+                consecutiveRateLimits = 0;
+            }
+            return result;
         } catch (error) {
             lastError = error;
             const isRateLimit = isRateLimitError(error);
+            
+            if (isRateLimit) {
+                rateLimitCount++;
+                consecutiveRateLimits++;
+            }
             
             // Log the error structure for debugging
             console.log(`API Call Error (attempt ${attempt + 1}/${maxRetries}):`, {
@@ -83,17 +101,20 @@ const callWithRetry = async (apiCall, maxRetries = 5) => {
                 type: error?.type,
                 message: error?.message?.substring(0, 200),
                 responseStatus: error?.response?.status,
-                responseData: error?.response?.data
+                responseData: error?.response?.data,
+                consecutiveRateLimits
             });
             
             // Check if it's a 429 rate limit error and we have retries left
             if (isRateLimit && attempt < maxRetries - 1) {
-                // Longer exponential backoff: start with 5 seconds, then 10, 20, 40, 80 seconds
-                const baseWaitTime = Math.pow(2, attempt) * 5000; // Start at 5 seconds
-                const jitter = Math.random() * 2000; // Add 0-2 seconds of jitter
-                const waitTime = baseWaitTime + jitter;
+                // Much longer exponential backoff: start with 15 seconds, then 30, 60, 120, 240 seconds
+                // Also add extra time based on consecutive rate limits
+                const baseWaitTime = Math.pow(2, attempt) * 15000; // Start at 15 seconds
+                const consecutivePenalty = consecutiveRateLimits * 10000; // Add 10s for each consecutive rate limit
+                const jitter = Math.random() * 5000; // Add 0-5 seconds of jitter
+                const waitTime = baseWaitTime + consecutivePenalty + jitter;
                 
-                console.log(`Rate limit detected. Waiting ${Math.round(waitTime/1000)}s before retry ${attempt + 2}/${maxRetries}`);
+                console.log(`Rate limit detected (consecutive: ${consecutiveRateLimits}). Waiting ${Math.round(waitTime/1000)}s before retry ${attempt + 2}/${maxRetries}`);
                 
                 await new Promise(resolve => setTimeout(resolve, waitTime));
                 continue;
@@ -105,6 +126,7 @@ const callWithRetry = async (apiCall, maxRetries = 5) => {
     }
     
     // If we get here, all retries failed
+    // Keep the consecutive rate limit counter for next request
     throw lastError;
 };
 
@@ -187,31 +209,31 @@ export const generateArticle= async (req,res)=>{
         const response = await callWithRetry(() => 
             throttleRequest(() => 
                 openai.chat.completions.create({
-                    model: "gemini-2.0-flash",
-                    messages: [
-                        {
-                            role: "user",
-                            content:prompt,
-                        },
-                    ],
-                    temperature: 0.7,
-                    max_tokens: length,
+    model: "gemini-2.0-flash",
+    messages: [
+        {
+            role: "user",
+            content:prompt,
+        },
+    ],
+    temperature: 0.7,
+    max_tokens: length,
                 })
             )
         );
 
-        const content= response.choices[0].message.content 
+    const content= response.choices[0].message.content 
 
-        await sql` INSERT INTO creations (user_id, prompt, content, type) 
-        VALUES (${userId}, ${prompt}, ${content}, 'article' )`;
+    await sql` INSERT INTO creations (user_id, prompt, content, type) 
+    VALUES (${userId}, ${prompt}, ${content}, 'article' )`;
 
-        if(plan!=='premium'){
-            await clerkClient.users.updateUserMetadata(userId, {
-                privateMetadata:{
-                    free_usage: free_usage +1
-                }
-            })
-        }
+    if(plan!=='premium'){
+        await clerkClient.users.updateUserMetadata(userId, {
+            privateMetadata:{
+                free_usage: free_usage +1
+            }
+        })
+    }
         res.json({ success: true, content})
 
     }catch(error){
@@ -236,31 +258,31 @@ export const generateBlogTitle = async (req,res)=>{
         const response = await callWithRetry(() => 
             throttleRequest(() => 
                 openai.chat.completions.create({
-                    model: "gemini-2.0-flash",
-                    messages: [
-                        {
-                            role: "user",
-                            content:prompt,
-                        },
-                    ],
-                    temperature: 0.7,
-                    max_tokens: 1000,
+    model: "gemini-2.0-flash",
+    messages: [
+        {
+            role: "user",
+            content:prompt,
+        },
+    ],
+    temperature: 0.7,
+    max_tokens: 1000,
                 })
             )
         );
 
-        const content= response.choices[0].message.content 
+    const content= response.choices[0].message.content 
 
-        await sql` INSERT INTO creations (user_id, prompt, content, type) 
-        VALUES (${userId}, ${prompt}, ${content}, 'blog-title' )`;
+    await sql` INSERT INTO creations (user_id, prompt, content, type) 
+    VALUES (${userId}, ${prompt}, ${content}, 'blog-title' )`;
 
-        if(plan!=='premium'){
-            await clerkClient.users.updateUserMetadata(userId, {
-                privateMetadata:{
-                    free_usage: free_usage +1
-                }
-            })
-        }
+    if(plan!=='premium'){
+        await clerkClient.users.updateUserMetadata(userId, {
+            privateMetadata:{
+                free_usage: free_usage +1
+            }
+        })
+    }
         res.json({ success: true, content})
 
     }catch(error){
@@ -402,10 +424,10 @@ export const resumeReview = async (req, res) => {
     const response = await callWithRetry(() => 
       throttleRequest(() => 
         openai.chat.completions.create({
-          model: "gemini-2.0-flash",
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0.7,
-          max_tokens: 1500,
+      model: "gemini-2.0-flash",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+      max_tokens: 1500,
         })
       )
     );
